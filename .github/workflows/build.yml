@@ -52,7 +52,7 @@ jobs:
         with:
           submodules: true
           persist-credentials: false
-      - run: rustup override set 1.87.0
+      - run: rustup override set 1.85.0
       - run: rustup toolchain install nightly
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo +nightly update -Z direct-minimal-versions

@@ -318,7 +318,7 @@ impl<'a> OxStr<'a> {
     const unsafe fn owned_str(&self) -> &str {
         // SAFETY: the caller ensured the pointer targets the reference counter + string
         unsafe {
-            str::from_utf8_unchecked(
+            std::str::from_utf8_unchecked(
                 NonNull::slice_from_raw_parts(
                     self.data.cast::<AtomicUsize>().add(1).cast(),
                     self.owned_len(),
@@ -332,7 +332,7 @@ impl<'a> OxStr<'a> {
     const unsafe fn owned_str_mut(&mut self) -> &mut str {
         // SAFETY: the caller ensured the pointer references the reference counter + string and that reference count is 1 (single access)
         unsafe {
-            str::from_utf8_unchecked_mut(
+            std::str::from_utf8_unchecked_mut(
                 NonNull::slice_from_raw_parts(
                     self.data.cast::<AtomicUsize>().add(1).cast(),
                     self.owned_len(),
@@ -351,7 +351,9 @@ impl<'a> OxStr<'a> {
     const unsafe fn borrowed_str(&self) -> &'a str {
         // SAFETY: the caller ensured the pointer references a borrowed string and 'a is the borrowed string lifetime
         unsafe {
-            str::from_utf8_unchecked(NonNull::slice_from_raw_parts(self.data, self.len).as_ref())
+            std::str::from_utf8_unchecked(
+                NonNull::slice_from_raw_parts(self.data, self.len).as_ref(),
+            )
         }
     }
 }
@@ -582,7 +584,7 @@ impl<'de> Deserialize<'de> for OxStr<'_> {
             }
 
             fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
-                let str = str::from_utf8(v)
+                let str = std::str::from_utf8(v)
                     .map_err(|_| de::Error::invalid_value(de::Unexpected::Bytes(v), &self))?;
                 self.visit_str(str)
             }
