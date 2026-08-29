@@ -1,0 +1,32 @@
+[package]
+name = "oxstr"
+version = "0.1.0-dev"
+authors = ["Tpt <thomas@pellissier-tanon.fr>"]
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+documentation = "https://docs.rs/oxstr"
+keywords = ["String"]
+repository = "https://github.com/oxigraph/oxstr"
+homepage = "https://github.com/oxigraph/oxstr"
+description = """
+A string type merging Arc<str> and &str
+"""
+edition = "2024"
+rust-version = "1.87"
+
+[features]
+serde = ["dep:serde"]
+
+[dependencies]
+serde = { version = "1", optional = true }
+
+[dev-dependencies]
+codspeed-criterion-compat = ">=4,<6"
+
+[[bench]]
+name = "str"
+harness = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
