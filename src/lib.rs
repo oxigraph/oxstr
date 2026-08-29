@@ -157,7 +157,11 @@ impl<'a> OxStr<'a> {
     #[inline]
     pub fn try_concat<T: AsRef<str>>(values: impl AsRef<[T]>) -> Result<Self, ReserveError> {
         let values = values.as_ref();
-        let len = values.iter().map(|s| s.as_ref().len()).sum();
+        let len = values
+            .iter()
+            .map(|s| s.as_ref().len())
+            .try_fold(0usize, |a, v| a.checked_add(v))
+            .ok_or(ReserveError::CapacityOverflow)?;
         if len >> KIND_SHIFT != 0 {
             return Err(ReserveError::CapacityOverflow); // The length is so long that it prevents using the "owned" flag, we fail to create the string
         }
