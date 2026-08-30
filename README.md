@@ -5,18 +5,23 @@ OxStr
 [![Latest Version](https://img.shields.io/crates/v/oxstr.svg)](https://crates.io/crates/oxstr)
 [![Released API docs](https://docs.rs/oxstr/badge.svg)](https://docs.rs/oxstr)
 
-A Rust compact string type that can be either borrowed or reference-counted owned data.
+A compact Rust string type that can hold either borrowed or reference-counted owned data.
 
-`OxStr` is conceptually a fusion of `Arc<str>` and `Cow<'a, str>`:
-it allows storing a string slice (`&str`)
-or a reference-counted fixed-sized string (`Arc<str>`), enabling cheap clones of owned data.
+`OxStr<'a>` is conceptually a fusion of `Arc<str>` and `Cow<'a, str>`:
+it can store either a borrowed string slice (`&'a str`) without allocating or an
+immutable-length, reference-counted string similar to `Arc<str>`. Cloning owned values is cheap.
 
-It is not relying on an enum but uses an optimized layout, storing only a pointer and a `usize` length.
-It relies on a magic bit in the length to know if the value is borrowed or owned.
-If borrowed, the pointer directly targets the string bytes.
-If owned, the pointer points to a memory allocation with first the reference counter, then the string bytes.
+It is designed for use cases where a string is created once from a known input and then reused,
+cloned, and shared extensively. The `OxString` type alias is available when a fully owned or
+`'static` value is required.
 
-When owned, cloning is cheap and increments an atomic reference count.
+Rather than using an enum, `OxStr` has a compact two-word layout containing a pointer and a
+`usize` length. The most significant bit of the length identifies whether the value is borrowed
+or owned. For a borrowed value, the pointer targets the string bytes directly. For an owned value,
+the pointer targets an allocation containing an atomic reference count followed by the string bytes.
+
+Cloning an owned value increments its atomic reference count; cloning a borrowed value remains
+borrowed and does not allocate.
 
 ```rust
 use oxstr::OxStr;
@@ -28,7 +33,7 @@ assert_eq!(borrowed.as_str(), "hello");
 assert_eq!(owned.as_str(), "hello");
 ```
 
-There is also a utility method to build a concatenated string in-place:
+The `concat` method allocates one owned value and copies the supplied string slices directly into it:
 
 ```rust
 use oxstr::OxStr;
