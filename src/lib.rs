@@ -13,6 +13,9 @@
 
 extern crate alloc;
 
+mod builder;
+
+pub use crate::builder::OxStrBuilder;
 use alloc::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use alloc::borrow::{Cow, ToOwned};
 use alloc::string::String;
