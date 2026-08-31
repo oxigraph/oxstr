@@ -15,10 +15,12 @@ edition = "2024"
 rust-version = "1.87"
 
 [features]
+default = ["std"]
+std = []
 serde = ["dep:serde"]
 
 [dependencies]
-serde = { version = "1.0.217", optional = true }
+serde = { version = "1.0.217", default-features = false, optional = true }
 
 [dev-dependencies]
 codspeed-criterion-compat = ">=4,<6"

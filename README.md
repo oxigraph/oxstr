@@ -41,6 +41,11 @@ use oxstr::OxStr;
 assert_eq!(OxStr::concat(["foo", " ", "bar"]), "foo bar");
 ```
 
+Features:
+- `serde`: to enable `serde` integration.
+- `std`: to add some extra features relying on the `std` library
+  (enabled by default, disable if you want no-std compatibility).
+
 
 ## License
 

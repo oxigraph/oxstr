@@ -1,30 +1,34 @@
 #![doc = include_str!("../README.md")]
+#![cfg_attr(not(feature = "std"), no_std)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(
     future_incompatible,
     nonstandard_style,
-    rust_2018_idioms,
-    missing_copy_implementations,
     trivial_casts,
     trivial_numeric_casts,
-    unsafe_code,
     unused_qualifications
 )]
-#![expect(unsafe_code)]
 
+extern crate alloc;
+
+use alloc::alloc::{Layout, alloc, dealloc};
+use alloc::borrow::Cow;
+use alloc::string::String;
+use core::borrow::Borrow;
+use core::error::Error;
+use core::hash::{Hash, Hasher};
+use core::marker::PhantomData;
+use core::mem::transmute;
+use core::ops::Deref;
+use core::ptr::NonNull;
+use core::sync::atomic::{AtomicUsize, Ordering, fence};
+use core::{fmt, str};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
-use std::alloc::{Layout, alloc, dealloc};
-use std::borrow::{Borrow, Cow};
-use std::error::Error;
-use std::hash::{Hash, Hasher};
-use std::marker::PhantomData;
-use std::mem::transmute;
-use std::ops::Deref;
+#[cfg(feature = "std")] // TODO: remove if alloc_io gets stabilized
+use std::io;
+#[cfg(feature = "std")]
 use std::process::abort;
-use std::ptr::NonNull;
-use std::sync::atomic::{AtomicUsize, Ordering, fence};
-use std::{fmt, io};
 
 const MAX_REF_COUNTER: usize = isize::MAX as usize;
 const KIND_SHIFT: u32 = usize::BITS - 1;
@@ -32,9 +36,9 @@ const OWNED_FLAG: usize = (OxStrKind::Owned as usize) << KIND_SHIFT;
 
 /// Owned variant of [`OxStr`]: A compact string type for reference-counted owned data or static slices.
 ///
-/// `OxString` is conceptually a fusion of [`Arc<str>`](std::sync::Arc) and [`Cow<'static, str>`](std::borrow::Cow):
-/// it allows storing a static string slice ([`&'static str`](std::str))
-/// or a reference-counted fixed-sized string ([`Arc<str>`](std::sync::Arc)), enabling cheap clones of owned data.
+/// `OxString` is conceptually a fusion of [`Arc<str>`](alloc::sync::Arc) and [`Cow<'static, str>`](alloc::borrow::Cow):
+/// it allows storing a static string slice ([`&'static str`](core::str))
+/// or a reference-counted fixed-sized string ([`Arc<str>`](alloc::sync::Arc)), enabling cheap clones of owned data.
 ///
 /// When owned, cloning is cheap and increments an atomic reference count.
 ///
@@ -50,9 +54,9 @@ pub type OxString = OxStr<'static>;
 
 /// A compact string type that can be either borrowed or reference-counted owned data.
 ///
-/// `OxStr` is conceptually a fusion of [`Arc<str>`](std::sync::Arc) and [`Cow<'a, str>`](std::borrow::Cow):
-/// it allows storing a string slice ([`&str`](std::str))
-/// or a reference-counted fixed-sized string ([`Arc<str>`](std::sync::Arc)), enabling cheap clones of owned data.
+/// `OxStr` is conceptually a fusion of [`Arc<str>`](alloc::sync::Arc) and [`Cow<'a, str>`](alloc::borrow::Cow):
+/// it allows storing a string slice ([`&str`](core::str))
+/// or a reference-counted fixed-sized string ([`Arc<str>`](alloc::sync::Arc)), enabling cheap clones of owned data.
 ///
 /// It is not relying on an enum but uses an optimized layout, storing only a pointer and a `usize` length.
 /// It relies on a magic bit in the length to know if the value is borrowed or owned.
@@ -220,7 +224,10 @@ impl<'a> OxStr<'a> {
 
                     // We guard against massive ref count in case of forgetting strings
                     if count > MAX_REF_COUNTER {
+                        #[cfg(feature = "std")]
                         abort();
+                        #[cfg(not(feature = "std"))]
+                        panic!("OxStr reference count overflow");
                     }
 
                     OxStr {
@@ -398,7 +405,10 @@ impl Clone for OxStr<'_> {
 
             // We guard against massive ref count in case of forgetting strings
             if count > MAX_REF_COUNTER {
+                #[cfg(feature = "std")]
                 abort();
+                #[cfg(not(feature = "std"))]
+                panic!("OxStr reference count overflow");
             }
         }
         Self {
@@ -510,14 +520,14 @@ impl Eq for OxStr<'_> {}
 
 impl PartialOrd for OxStr<'_> {
     #[inline]
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl Ord for OxStr<'_> {
     #[inline]
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
         self.as_str().cmp(other.as_str())
     }
 }
@@ -606,7 +616,6 @@ enum OxStrKind {
 
 /// Error raised when an allocation fails
 #[derive(PartialEq, Eq, Debug, Clone)]
-#[expect(missing_copy_implementations)]
 pub enum ReserveError {
     /// Error due to the computed capacity exceeding the data structure maximum
     CapacityOverflow,
@@ -633,6 +642,7 @@ impl fmt::Display for ReserveError {
 
 impl Error for ReserveError {}
 
+#[cfg(feature = "std")]
 impl From<ReserveError> for io::Error {
     #[inline]
     fn from(error: ReserveError) -> Self {
@@ -644,7 +654,7 @@ impl From<ReserveError> for io::Error {
 mod tests {
     use super::*;
     #[cfg(target_pointer_width = "32")]
-    use std::hint::black_box;
+    use core::hint::black_box;
 
     #[test]
     fn owned_clone() {
