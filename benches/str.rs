@@ -71,6 +71,18 @@ fn bench_oxstr_owned_to_string(c: &mut Criterion) {
     });
 }
 
+fn bench_oxstr_from_string(c: &mut Criterion) {
+    c.bench_function("OxStr::from String", |b| {
+        b.iter_batched(
+            || black_box("I am a quite enough long string, isn't it?".to_string()),
+            |str| {
+                let _ = OxStr::from(black_box(str));
+            },
+            BatchSize::SmallInput,
+        )
+    });
+}
+
 criterion_group!(
     oxstr,
     bench_oxstr_new_owned,
