@@ -18,7 +18,7 @@ use core::borrow::Borrow;
 use core::error::Error;
 use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
-use core::mem::transmute;
+use core::mem::{ManuallyDrop, transmute};
 use core::ops::Deref;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering, fence};
@@ -202,10 +202,40 @@ impl<'a> OxStr<'a> {
             .pad_to_align()
     }
 
+    /// Converts to an owned [`OxStr<'static>`](Self), taking the type ownership.
+    ///
+    /// If `self` is already owned, this is a no-op.
+    /// If `self` is borrowed, data is copied into a new allocation.
+    ///
+    /// ```
+    /// use oxstr::OxStr;
+    ///
+    /// let borrowed = OxStr::new("hello");
+    /// let owned = borrowed.into_owned();
+    /// assert_eq!(owned.as_str(), "hello");
+    /// ```
+    #[inline]
+    pub fn into_owned(self) -> OxStr<'static> {
+        match self.kind() {
+            OxStrKind::Owned => {
+                // SAFETY: we just checked it's owned, so we can extend the lifetime
+                let this = ManuallyDrop::new(self);
+                OxStr {
+                    len: this.len,
+                    data: this.data,
+                    _marker: PhantomData,
+                }
+            }
+            OxStrKind::Borrowed => OxStr::new_owned(self.as_str()),
+        }
+    }
+
     /// Converts to an owned [`OxStr<'static>`](Self).
     ///
     /// If `self` is already owned, this only increments the internal atomic refcount.
     /// If `self` is borrowed, data is copied into a new allocation.
+    ///
+    /// Use [`into_owned`](Self::into_owned) if you already have ownership of the string.
     ///
     /// ```
     /// use oxstr::OxStr;
@@ -216,29 +246,7 @@ impl<'a> OxStr<'a> {
     /// ```
     #[inline]
     pub fn to_owned(&self) -> OxStr<'static> {
-        match self.kind() {
-            OxStrKind::Owned => {
-                // SAFETY: we just checked it's owned, the pointer points to the reference counter, and we can increment it to do a clone
-                unsafe {
-                    let count = self.owned_counter().fetch_add(1, Ordering::Relaxed); // Arc is also using relaxed, I guess it's fine
-
-                    // We guard against massive ref count in case of forgetting strings
-                    if count > MAX_REF_COUNTER {
-                        #[cfg(feature = "std")]
-                        abort();
-                        #[cfg(not(feature = "std"))]
-                        panic!("OxStr reference count overflow");
-                    }
-
-                    OxStr {
-                        len: self.len,
-                        data: self.data,
-                        _marker: PhantomData,
-                    }
-                }
-            }
-            OxStrKind::Borrowed => OxStr::new_owned(self.as_str()),
-        }
+        self.clone().into_owned()
     }
 
     /// Returns the inner string as a slice.
