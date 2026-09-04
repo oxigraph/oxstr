@@ -6,14 +6,17 @@
     nonstandard_style,
     trivial_casts,
     trivial_numeric_casts,
-    unused_qualifications
+    unused_qualifications,
+    clippy::unwrap_used,
+    clippy::expect_used
 )]
 
 extern crate alloc;
 
-use alloc::alloc::{Layout, alloc, dealloc};
+use alloc::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use alloc::borrow::Cow;
 use alloc::string::String;
+use core::alloc::LayoutError;
 use core::borrow::Borrow;
 use core::error::Error;
 use core::hash::{Hash, Hasher};
@@ -111,9 +114,9 @@ impl<'a> OxStr<'a> {
     /// assert_eq!(value.as_str(), "abc");
     /// ```
     #[inline]
-    #[expect(clippy::unwrap_used)]
+    #[track_caller]
     pub fn new_owned(value: &str) -> Self {
-        Self::try_new_owned(value).unwrap()
+        Self::try_new_owned(value).unwrap_or_else(|e| e.unwrap())
     }
 
     /// Creates an owned `OxStr` by copying `value`.
@@ -142,9 +145,9 @@ impl<'a> OxStr<'a> {
     /// assert_eq!(value.as_str(), "abcdef");
     /// ```
     #[inline]
-    #[expect(clippy::unwrap_used)]
+    #[track_caller]
     pub fn concat<T: AsRef<str>>(values: impl AsRef<[T]>) -> Self {
-        Self::try_concat(values).unwrap()
+        Self::try_concat(values).unwrap_or_else(|e| e.unwrap())
     }
 
     /// Concatenates all `values` into a new owned `OxStr`.
@@ -172,7 +175,8 @@ impl<'a> OxStr<'a> {
 
         // SAFETY: we carefully choose the layout. Then we can allocate, check that allocation works and write to the allocation
         unsafe {
-            let layout = Self::owned_layout_for_len(len);
+            let layout =
+                Self::owned_layout_for_len(len).map_err(|_| ReserveError::CapacityOverflow)?;
             let data = NonNull::new(alloc(layout)).ok_or(ReserveError::AllocError {
                 layout,
                 non_exhaustive: (),
@@ -194,12 +198,11 @@ impl<'a> OxStr<'a> {
     }
 
     #[inline]
-    fn owned_layout_for_len(len: usize) -> Layout {
-        Layout::new::<AtomicUsize>()
-            .extend(Layout::array::<u8>(len).unwrap())
-            .unwrap()
+    fn owned_layout_for_len(len: usize) -> Result<Layout, LayoutError> {
+        Ok(Layout::new::<AtomicUsize>()
+            .extend(Layout::array::<u8>(len)?)?
             .0
-            .pad_to_align()
+            .pad_to_align())
     }
 
     /// Converts to an owned [`OxStr<'static>`](Self), taking the type ownership.
@@ -382,6 +385,7 @@ unsafe impl Sync for OxStr<'_> {}
 
 impl Drop for OxStr<'_> {
     #[inline]
+    #[track_caller]
     fn drop(&mut self) {
         if self.kind() == OxStrKind::Owned {
             // SAFETY: we just checked it's the owned variant, we can call owned_counter
@@ -393,9 +397,11 @@ impl Drop for OxStr<'_> {
                     return;
                 }
                 fence(Ordering::Acquire);
+                #[expect(clippy::expect_used)]
                 dealloc(
                     self.data.as_ptr(),
-                    Self::owned_layout_for_len(self.owned_len()),
+                    Self::owned_layout_for_len(self.owned_len())
+                        .expect("We have allocated with this layout"),
                 );
             }
         }
@@ -634,6 +640,16 @@ pub enum ReserveError {
         #[doc(hidden)]
         non_exhaustive: (),
     },
+}
+
+impl ReserveError {
+    #[track_caller]
+    fn unwrap(self) -> ! {
+        match self {
+            Self::CapacityOverflow => panic!("OxStr capacity overflow"),
+            Self::AllocError { layout, .. } => handle_alloc_error(layout),
+        }
+    }
 }
 
 impl fmt::Display for ReserveError {
