@@ -329,7 +329,7 @@ impl<'a> OxStr<'a> {
     const unsafe fn owned_str(&self) -> &str {
         // SAFETY: the caller ensured the pointer targets the reference counter + string
         unsafe {
-            std::str::from_utf8_unchecked(
+            str::from_utf8_unchecked(
                 NonNull::slice_from_raw_parts(
                     self.data.cast::<AtomicUsize>().add(1).cast(),
                     self.owned_len(),
@@ -343,7 +343,7 @@ impl<'a> OxStr<'a> {
     const unsafe fn owned_str_mut(&mut self) -> &mut str {
         // SAFETY: the caller ensured the pointer references the reference counter + string and that reference count is 1 (single access)
         unsafe {
-            std::str::from_utf8_unchecked_mut(
+            str::from_utf8_unchecked_mut(
                 NonNull::slice_from_raw_parts(
                     self.data.cast::<AtomicUsize>().add(1).cast(),
                     self.owned_len(),
@@ -362,9 +362,7 @@ impl<'a> OxStr<'a> {
     const unsafe fn borrowed_str(&self) -> &'a str {
         // SAFETY: the caller ensured the pointer references a borrowed string and 'a is the borrowed string lifetime
         unsafe {
-            std::str::from_utf8_unchecked(
-                NonNull::slice_from_raw_parts(self.data, self.len).as_ref(),
-            )
+            str::from_utf8_unchecked(NonNull::slice_from_raw_parts(self.data, self.len).as_ref())
         }
     }
 }
