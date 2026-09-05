@@ -7,8 +7,7 @@
     trivial_casts,
     trivial_numeric_casts,
     unused_qualifications,
-    clippy::unwrap_used,
-    clippy::expect_used
+    clippy::unwrap_used
 )]
 
 extern crate alloc;
@@ -28,6 +27,7 @@ use core::sync::atomic::{AtomicUsize, Ordering, fence};
 use core::{fmt, str};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use std::alloc::realloc;
 #[cfg(feature = "std")] // TODO: remove if alloc_io gets stabilized
 use std::io;
 #[cfg(feature = "std")]
@@ -36,6 +36,7 @@ use std::process::abort;
 const MAX_REF_COUNTER: usize = isize::MAX as usize;
 const KIND_SHIFT: u32 = usize::BITS - 1;
 const OWNED_FLAG: usize = (OxStrKind::Owned as usize) << KIND_SHIFT;
+const LEN_MASK: usize = usize::MAX >> 1;
 
 /// Owned variant of [`OxStr`]: A compact string type for reference-counted owned data or static slices.
 ///
@@ -64,7 +65,7 @@ pub type OxString = OxStr<'static>;
 /// It is not relying on an enum but uses an optimized layout, storing only a pointer and a `usize` length.
 /// It relies on a magic bit in the length to know if the value is borrowed or owned.
 /// If borrowed, the pointer directly targets the string bytes.
-/// If owned, the pointer points to a memory allocation with first the reference counter, then the string bytes.
+/// If owned, the pointer points to a memory allocation with first the string bytes, then the reference counter.
 ///
 /// When owned, cloning is cheap and increments an atomic reference count.
 ///
@@ -181,8 +182,10 @@ impl<'a> OxStr<'a> {
                 layout,
                 non_exhaustive: (),
             })?;
-            data.cast::<AtomicUsize>().write(AtomicUsize::new(1));
-            let mut write_ptr = data.cast::<AtomicUsize>().add(1).cast::<u8>();
+            data.byte_add(Self::owned_counter_offset(len))
+                .cast::<AtomicUsize>()
+                .write(AtomicUsize::new(1));
+            let mut write_ptr = data;
             for value in values {
                 let value = value.as_ref();
                 write_ptr
@@ -199,10 +202,20 @@ impl<'a> OxStr<'a> {
 
     #[inline]
     fn owned_layout_for_len(len: usize) -> Result<Layout, LayoutError> {
-        Ok(Layout::new::<AtomicUsize>()
-            .extend(Layout::array::<u8>(len)?)?
+        Ok(Layout::array::<u8>(len)?
+            .extend(Layout::new::<AtomicUsize>())?
             .0
             .pad_to_align())
+    }
+
+    #[inline]
+    fn owned_counter_offset(len: usize) -> usize {
+        #[expect(clippy::expect_used)]
+        Layout::array::<u8>(len)
+            .expect("we have allocated with this layout")
+            .extend(Layout::new::<AtomicUsize>())
+            .expect("we have allocated with this layout")
+            .1
     }
 
     /// Converts to an owned [`OxStr<'static>`](Self), taking the type ownership.
@@ -255,15 +268,11 @@ impl<'a> OxStr<'a> {
     /// Returns the inner string as a slice.
     #[inline]
     pub const fn as_str(&self) -> &str {
-        match self.kind() {
-            OxStrKind::Borrowed => {
-                // SAFETY: We know we are in the borrowed case
-                unsafe { self.borrowed_str() }
-            }
-            OxStrKind::Owned => {
-                // SAFETY: We know we are in the borrowed case
-                unsafe { self.owned_str() }
-            }
+        // SAFETY: data is always pointing to a slice of size len()
+        unsafe {
+            str::from_utf8_unchecked(
+                NonNull::slice_from_raw_parts(self.data, self.bytes_len()).as_ref(),
+            )
         }
     }
 
@@ -325,56 +334,35 @@ impl<'a> OxStr<'a> {
 
     #[inline]
     fn is_owned_and_unique(&self) -> bool {
-        // SAFETY: the caller ensured the pointer targets the reference counter
+        // SAFETY: the kind check ensures the pointer targets an owned allocation
         self.kind() == OxStrKind::Owned
             && unsafe { self.owned_counter().load(Ordering::Acquire) == 1 }
     }
 
     #[inline]
     unsafe fn owned_counter(&self) -> &AtomicUsize {
-        // SAFETY: the caller ensured the pointer targets the reference counter
-        unsafe { self.data.cast().as_ref() }
-    }
-
-    #[inline]
-    const unsafe fn owned_str(&self) -> &str {
-        // SAFETY: the caller ensured the pointer targets the reference counter + string
+        // SAFETY: the caller ensured the pointer targets an owned allocation, whose reference counter follows the string
         unsafe {
-            str::from_utf8_unchecked(
-                NonNull::slice_from_raw_parts(
-                    self.data.cast::<AtomicUsize>().add(1).cast(),
-                    self.owned_len(),
-                )
-                .as_ref(),
-            )
+            self.data
+                .byte_add(Self::owned_counter_offset(self.bytes_len()))
+                .cast()
+                .as_ref()
         }
     }
 
     #[inline]
     const unsafe fn owned_str_mut(&mut self) -> &mut str {
-        // SAFETY: the caller ensured the pointer references the reference counter + string and that reference count is 1 (single access)
+        // SAFETY: the caller ensured the pointer references the string bytes in an owned allocation and that reference count is 1 (single access)
         unsafe {
             str::from_utf8_unchecked_mut(
-                NonNull::slice_from_raw_parts(
-                    self.data.cast::<AtomicUsize>().add(1).cast(),
-                    self.owned_len(),
-                )
-                .as_mut(),
+                NonNull::slice_from_raw_parts(self.data, self.bytes_len()).as_mut(),
             )
         }
     }
 
     #[inline]
-    const fn owned_len(&self) -> usize {
-        self.len ^ OWNED_FLAG
-    }
-
-    #[inline]
-    const unsafe fn borrowed_str(&self) -> &'a str {
-        // SAFETY: the caller ensured the pointer references a borrowed string and 'a is the borrowed string lifetime
-        unsafe {
-            str::from_utf8_unchecked(NonNull::slice_from_raw_parts(self.data, self.len).as_ref())
-        }
+    const fn bytes_len(&self) -> usize {
+        self.len & LEN_MASK
     }
 }
 
@@ -400,7 +388,7 @@ impl Drop for OxStr<'_> {
                 #[expect(clippy::expect_used)]
                 dealloc(
                     self.data.as_ptr(),
-                    Self::owned_layout_for_len(self.owned_len())
+                    Self::owned_layout_for_len(self.bytes_len())
                         .expect("We have allocated with this layout"),
                 );
             }
@@ -584,7 +572,32 @@ impl<'a> From<&'a OxStr<'a>> for &'a str {
 impl From<String> for OxStr<'_> {
     #[inline]
     fn from(value: String) -> Self {
-        Self::new_owned(&value)
+        if value.is_empty() {
+            return OxStr::new(""); // Empty string, no need to realloc (ptr is danling anyway)
+        }
+        let (ptr, length, capacity) = value.into_raw_parts();
+        // We make sure the allocation is at the right size
+        let new_layout = OxStr::owned_layout_for_len(length).unwrap();
+        let ptr = unsafe {
+            NonNull::new(realloc(
+                ptr,
+                Layout::array::<u8>(capacity).unwrap(),
+                new_layout.size(),
+            ))
+            .unwrap_or_else(|| handle_alloc_error(new_layout))
+        };
+        // We initialize the reference counter
+        // SAFETY: we just called realloc to make sure the layout is correct
+        unsafe {
+            ptr.byte_add(Self::owned_counter_offset(length))
+                .cast::<AtomicUsize>()
+                .write(AtomicUsize::new(1));
+        }
+        OxStr {
+            len: length | OWNED_FLAG,
+            data: ptr,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -611,7 +624,11 @@ impl<'a> From<OxStr<'a>> for Cow<'a, str> {
         match value.kind() {
             OxStrKind::Borrowed => {
                 // SAFETY: This is a borrowed string, it's lifetime is 'a
-                unsafe { Cow::Borrowed(value.borrowed_str()) }
+                unsafe {
+                    Cow::Borrowed(str::from_utf8_unchecked(
+                        NonNull::slice_from_raw_parts(value.data, value.len).as_ref(),
+                    ))
+                }
             }
             OxStrKind::Owned => Cow::Owned(value.into()),
         }

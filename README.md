@@ -18,7 +18,7 @@ cloned, and shared extensively. The `OxString` type alias is available when a fu
 Rather than using an enum, `OxStr` has a compact two-word layout containing a pointer and a
 `usize` length. The most significant bit of the length identifies whether the value is borrowed
 or owned. For a borrowed value, the pointer targets the string bytes directly. For an owned value,
-the pointer targets an allocation containing an atomic reference count followed by the string bytes.
+the pointer targets an allocation containing the string bytes followed by an atomic reference count.
 
 Cloning an owned value increments its atomic reference count; cloning a borrowed value remains
 borrowed and does not allocate.
