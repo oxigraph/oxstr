@@ -14,7 +14,7 @@
 extern crate alloc;
 
 use alloc::alloc::{Layout, alloc, dealloc, handle_alloc_error};
-use alloc::borrow::Cow;
+use alloc::borrow::{Cow, ToOwned};
 use alloc::string::String;
 use core::alloc::LayoutError;
 use core::borrow::Borrow;
@@ -574,10 +574,47 @@ impl<'a> From<&'a str> for OxStr<'a> {
     }
 }
 
+impl<'a> From<&'a OxStr<'a>> for &'a str {
+    #[inline]
+    fn from(value: &'a OxStr<'a>) -> Self {
+        value.as_str()
+    }
+}
+
 impl From<String> for OxStr<'_> {
     #[inline]
     fn from(value: String) -> Self {
         Self::new_owned(&value)
+    }
+}
+
+impl From<OxStr<'_>> for String {
+    #[inline]
+    fn from(value: OxStr<'_>) -> Self {
+        value.as_str().to_owned()
+    }
+}
+
+impl<'a> From<Cow<'a, str>> for OxStr<'a> {
+    #[inline]
+    fn from(value: Cow<'a, str>) -> Self {
+        match value {
+            Cow::Borrowed(value) => value.into(),
+            Cow::Owned(value) => value.into(),
+        }
+    }
+}
+
+impl<'a> From<OxStr<'a>> for Cow<'a, str> {
+    #[inline]
+    fn from(value: OxStr<'a>) -> Self {
+        match value.kind() {
+            OxStrKind::Borrowed => {
+                // SAFETY: This is a borrowed string, it's lifetime is 'a
+                unsafe { Cow::Borrowed(value.borrowed_str()) }
+            }
+            OxStrKind::Owned => Cow::Owned(value.into()),
+        }
     }
 }
 
@@ -738,5 +775,97 @@ mod tests {
     #[test]
     fn default() {
         assert_eq!(OxStr::default(), "");
+    }
+
+    #[test]
+    fn from_string() {
+        assert_eq!(OxStr::from("".to_owned()).as_str(), "");
+        assert_eq!(OxStr::from("a".to_owned()).as_str(), "a");
+        assert_eq!(
+            OxStr::from("a string that starts to get a bit long".to_owned()).as_str(),
+            "a string that starts to get a bit long"
+        );
+        assert_eq!(OxStr::from(String::with_capacity(128)).as_str(), "");
+    }
+
+    #[test]
+    fn to_owned() {
+        assert_eq!(String::from(OxStr::new("")), String::new());
+        assert_eq!(String::from(OxStr::new_owned("")), String::new());
+        assert_eq!(String::from(OxStr::new("a")), "a".to_owned());
+        assert_eq!(String::from(OxStr::new_owned("a")), "a".to_owned());
+        assert_eq!(
+            String::from(OxStr::new("a string that starts to get a bit long")),
+            "a string that starts to get a bit long".to_owned()
+        );
+        assert_eq!(
+            String::from(OxStr::new_owned("a string that starts to get a bit long")),
+            "a string that starts to get a bit long".to_owned()
+        );
+    }
+
+    #[test]
+    fn from_str() {
+        assert_eq!(OxStr::from("").as_str(), "");
+        assert_eq!(OxStr::from("a").as_str(), "a");
+        assert_eq!(
+            OxStr::from("a string that starts to get a bit long").as_str(),
+            "a string that starts to get a bit long"
+        );
+    }
+
+    #[test]
+    fn to_str() {
+        assert_eq!(<&str>::from(&OxStr::new("")), "");
+        assert_eq!(<&str>::from(&OxStr::new_owned("")), "");
+        assert_eq!(<&str>::from(&OxStr::new("a")), "a");
+        assert_eq!(<&str>::from(&OxStr::new_owned("a")), "a");
+        assert_eq!(
+            <&str>::from(&OxStr::new("a string that starts to get a bit long")),
+            "a string that starts to get a bit long"
+        );
+        assert_eq!(
+            <&str>::from(&OxStr::new_owned("a string that starts to get a bit long")),
+            "a string that starts to get a bit long"
+        );
+    }
+
+    #[test]
+    fn from_str_cow() {
+        assert_eq!(OxStr::from(Cow::Borrowed("")).as_str(), "");
+        assert_eq!(OxStr::from(Cow::Owned(String::new())).as_str(), "");
+        assert_eq!(OxStr::from(Cow::Borrowed("a")).as_str(), "a");
+        assert_eq!(OxStr::from(Cow::Owned("a".to_owned())).as_str(), "a");
+        assert_eq!(
+            OxStr::from(Cow::Borrowed("a string that starts to get a bit long")).as_str(),
+            "a string that starts to get a bit long"
+        );
+        assert_eq!(
+            OxStr::from(Cow::Owned(
+                "a string that starts to get a bit long".to_owned()
+            ))
+            .as_str(),
+            "a string that starts to get a bit long"
+        );
+        assert_eq!(
+            OxStr::from(Cow::Owned(String::with_capacity(128))).as_str(),
+            ""
+        );
+    }
+
+    #[test]
+    fn to_str_cow() {
+        assert_eq!(Cow::from(OxStr::new("")), String::new());
+        assert_eq!(Cow::from(OxStr::new_owned("")), String::new());
+        assert_eq!(Cow::from(OxStr::new("a")), "a".to_owned());
+        assert_eq!(Cow::from(OxStr::new_owned("a")), "a".to_owned());
+        assert_eq!(
+            Cow::from(OxStr::new("a string that starts to get a bit long")),
+            "a string that starts to get a bit long".to_owned()
+        );
+        assert_eq!(
+            Cow::from(OxStr::new_owned("a string that starts to get a bit long")),
+            "a string that starts to get a bit long".to_owned()
+        );
     }
 }
