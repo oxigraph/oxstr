@@ -27,6 +27,7 @@ use core::sync::atomic::{AtomicUsize, Ordering, fence};
 use core::{fmt, str};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
+use std::alloc::realloc;
 #[cfg(feature = "std")] // TODO: remove if alloc_io gets stabilized
 use std::io;
 #[cfg(feature = "std")]
@@ -269,7 +270,9 @@ impl<'a> OxStr<'a> {
     pub const fn as_str(&self) -> &str {
         // SAFETY: data is always pointing to a slice of size len()
         unsafe {
-            str::from_utf8_unchecked(NonNull::slice_from_raw_parts(self.data, self.bytes_len()).as_ref())
+            str::from_utf8_unchecked(
+                NonNull::slice_from_raw_parts(self.data, self.bytes_len()).as_ref(),
+            )
         }
     }
 
@@ -569,7 +572,32 @@ impl<'a> From<&'a OxStr<'a>> for &'a str {
 impl From<String> for OxStr<'_> {
     #[inline]
     fn from(value: String) -> Self {
-        Self::new_owned(&value)
+        if value.is_empty() {
+            return OxStr::new(""); // Empty string, no need to realloc (ptr is danling anyway)
+        }
+        let (ptr, length, capacity) = value.into_raw_parts();
+        // We make sure the allocation is at the right size
+        let new_layout = OxStr::owned_layout_for_len(length).unwrap();
+        let ptr = unsafe {
+            NonNull::new(realloc(
+                ptr,
+                Layout::array::<u8>(capacity).unwrap(),
+                new_layout.size(),
+            ))
+            .unwrap_or_else(|| handle_alloc_error(new_layout))
+        };
+        // We initialize the reference counter
+        // SAFETY: we just called realloc to make sure the layout is correct
+        unsafe {
+            ptr.byte_add(Self::owned_counter_offset(length))
+                .cast::<AtomicUsize>()
+                .write(AtomicUsize::new(1));
+        }
+        OxStr {
+            len: length | OWNED_FLAG,
+            data: ptr,
+            _marker: PhantomData,
+        }
     }
 }
 
@@ -596,7 +624,11 @@ impl<'a> From<OxStr<'a>> for Cow<'a, str> {
         match value.kind() {
             OxStrKind::Borrowed => {
                 // SAFETY: This is a borrowed string, it's lifetime is 'a
-                unsafe { Cow::Borrowed(value.borrowed_str()) }
+                unsafe {
+                    Cow::Borrowed(str::from_utf8_unchecked(
+                        NonNull::slice_from_raw_parts(value.data, value.len).as_ref(),
+                    ))
+                }
             }
             OxStrKind::Owned => Cow::Owned(value.into()),
         }
