@@ -249,7 +249,18 @@ impl<'a> OxStr<'a> {
     /// ```
     #[inline]
     pub fn to_owned(&self) -> OxStr<'static> {
-        self.clone().into_owned()
+        match self.kind() {
+            OxStrKind::Borrowed => OxStr::new_owned(self.as_str()),
+            OxStrKind::Owned => {
+                let this = ManuallyDrop::new(self.clone());
+                // The cloned value is owned, so its lifetime can be extended.
+                OxStr {
+                    len: this.len,
+                    data: this.data,
+                    _marker: PhantomData,
+                }
+            }
+        }
     }
 
     /// Returns the inner string as a slice.
@@ -397,11 +408,11 @@ impl Drop for OxStr<'_> {
                     return;
                 }
                 fence(Ordering::Acquire);
-                #[expect(clippy::expect_used)]
                 dealloc(
                     self.data.as_ptr(),
-                    Self::owned_layout_for_len(self.owned_len())
-                        .expect("We have allocated with this layout"),
+                    // SAFETY: The length is immutable and this exact layout was
+                    // successfully computed when the allocation was created.
+                    Self::owned_layout_for_len(self.owned_len()).unwrap_unchecked(),
                 );
             }
         }
