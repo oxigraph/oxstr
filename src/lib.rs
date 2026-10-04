@@ -16,7 +16,6 @@ extern crate alloc;
 use alloc::alloc::{Layout, alloc, dealloc, handle_alloc_error};
 use alloc::borrow::{Cow, ToOwned};
 use alloc::string::String;
-use core::alloc::LayoutError;
 use core::borrow::Borrow;
 use core::error::Error;
 use core::hash::{Hash, Hasher};
@@ -25,7 +24,7 @@ use core::mem::{ManuallyDrop, transmute};
 use core::ops::Deref;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering, fence};
-use core::{fmt, str};
+use core::{fmt, slice, str};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 #[cfg(feature = "std")] // TODO: remove if alloc_io gets stabilized
@@ -36,6 +35,14 @@ use std::process::abort;
 const MAX_REF_COUNTER: usize = isize::MAX as usize;
 const KIND_SHIFT: u32 = usize::BITS - 1;
 const OWNED_FLAG: usize = (OxStrKind::Owned as usize) << KIND_SHIFT;
+// The allocation has byte alignment, like a [u8] buffer.
+// We allocate enough for the atomic counter, its alignment and the capacity stored "hidden" in the alignment.
+const HEADER_SPACE: usize = size_of::<AtomicUsize>()
+    + if size_of::<usize>() >= align_of::<AtomicUsize>() {
+        size_of::<usize>()
+    } else {
+        align_of::<AtomicUsize>()
+    };
 
 /// Owned variant of [`OxStr`]: A compact string type for reference-counted owned data or static slices.
 ///
@@ -64,9 +71,13 @@ pub type OxString = OxStr<'static>;
 /// It is not relying on an enum but uses an optimized layout, storing only a pointer and a `usize` length.
 /// It relies on a magic bit in the length to know if the value is borrowed or owned.
 /// If borrowed, the pointer directly targets the string bytes.
-/// If owned, the pointer points to a memory allocation with first the reference counter, then the string bytes.
+/// If owned, the pointer points to a memory allocation with the string bytes, then the reference counter and buffer capacity.
 ///
 /// When owned, cloning is cheap and increments an atomic reference count.
+///
+/// Conversion from [`String`] only reallocates if the buffer is not large enough
+/// to store the reference counter and the capacity.
+/// Conversion to [`String`] reuses the buffer and does not allocate.
 ///
 /// ```
 /// use oxstr::OxStr;
@@ -134,7 +145,7 @@ impl<'a> OxStr<'a> {
         Self::try_concat([value])
     }
 
-    /// Concatenates all `values` into a new owned `OxStr`.
+    /// Concatenates all `values` into a new owned `OxStr` without intermediate allocations.
     ///
     /// Panics if allocation fails. Use [`try_concat`](Self::try_concat) for a fallible variant.
     ///
@@ -150,7 +161,7 @@ impl<'a> OxStr<'a> {
         Self::try_concat(values).unwrap_or_else(|e| e.unwrap())
     }
 
-    /// Concatenates all `values` into a new owned `OxStr`.
+    /// Concatenates all `values` into a new owned `OxStr` without intermediate allocations.
     ///
     /// Returns `None` if allocation fails or if the final length exceeds the internal
     /// representable size.
@@ -175,14 +186,16 @@ impl<'a> OxStr<'a> {
 
         // SAFETY: we carefully choose the layout. Then we can allocate, check that allocation works and write to the allocation
         unsafe {
-            let layout =
-                Self::owned_layout_for_len(len).map_err(|_| ReserveError::CapacityOverflow)?;
+            let (layout, _) = Layout::array::<u8>(len)
+                .map_err(|_| ReserveError::CapacityOverflow)?
+                .extend(Layout::new::<[u8; HEADER_SPACE]>())
+                .map_err(|_| ReserveError::CapacityOverflow)?;
             let data = NonNull::new(alloc(layout)).ok_or(ReserveError::AllocError {
                 layout,
                 non_exhaustive: (),
             })?;
-            data.cast::<AtomicUsize>().write(AtomicUsize::new(1));
-            let mut write_ptr = data.cast::<AtomicUsize>().add(1).cast::<u8>();
+            initialize_counter_and_capacity(data, len, layout.size());
+            let mut write_ptr = data;
             for value in values {
                 let value = value.as_ref();
                 write_ptr
@@ -195,14 +208,6 @@ impl<'a> OxStr<'a> {
                 _marker: PhantomData,
             })
         }
-    }
-
-    #[inline]
-    fn owned_layout_for_len(len: usize) -> Result<Layout, LayoutError> {
-        Ok(Layout::new::<AtomicUsize>()
-            .extend(Layout::array::<u8>(len)?)?
-            .0
-            .pad_to_align())
     }
 
     /// Converts to an owned [`OxStr<'static>`](Self), taking the type ownership.
@@ -266,16 +271,22 @@ impl<'a> OxStr<'a> {
     /// Returns the inner string as a slice.
     #[inline]
     pub const fn as_str(&self) -> &str {
-        match self.kind() {
-            OxStrKind::Borrowed => {
-                // SAFETY: We know we are in the borrowed case
-                unsafe { self.borrowed_str() }
-            }
-            OxStrKind::Owned => {
-                // SAFETY: We know we are in the borrowed case
-                unsafe { self.owned_str() }
-            }
+        // SAFETY: both variants directly point to valid UTF-8 bytes
+        unsafe {
+            str::from_utf8_unchecked(NonNull::slice_from_raw_parts(self.data, self.len()).as_ref())
         }
+    }
+
+    /// The string length in bytes
+    #[inline]
+    pub const fn len(&self) -> usize {
+        self.len & !OWNED_FLAG
+    }
+
+    /// If the string is empty
+    #[inline]
+    pub const fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     /// Returns a mutable view of the string contents if this value is owned and uniquely held.
@@ -343,41 +354,45 @@ impl<'a> OxStr<'a> {
 
     #[inline]
     unsafe fn owned_counter(&self) -> &AtomicUsize {
-        // SAFETY: the caller ensured the pointer targets the reference counter
-        unsafe { self.data.cast().as_ref() }
+        // SAFETY: the caller ensure it's an owned buffer properly allocated.
+        // Owned buffers reserve HEADER_SPACE bytes after the string.
+        // The u8 pointer can always be aligned with at most align_of::<AtomicUsize> padding bytes.
+        unsafe {
+            let ptr = self.data.add(self.len());
+            ptr.add(ptr.align_offset(align_of::<AtomicUsize>()))
+                .cast()
+                .as_ref()
+        }
     }
 
     #[inline]
-    const unsafe fn owned_str(&self) -> &str {
-        // SAFETY: the caller ensured the pointer targets the reference counter + string
+    unsafe fn owned_capacity(&self) -> usize {
+        let mut capacity = [0; size_of::<usize>()];
+        // SAFETY: the caller ensure it's an owned buffer properly allocated.
+        // Owned buffers reserve HEADER_SPACE bytes after the string, including size_of::<usize> spread
+        // before and after the counter
         unsafe {
-            str::from_utf8_unchecked(
-                NonNull::slice_from_raw_parts(
-                    self.data.cast::<AtomicUsize>().add(1).cast(),
-                    self.owned_len(),
-                )
-                .as_ref(),
-            )
+            let ptr = self.data.add(self.len());
+            let counter_offset = ptr.align_offset(align_of::<AtomicUsize>());
+            capacity[..counter_offset]
+                .copy_from_slice(slice::from_raw_parts(ptr.as_ptr(), counter_offset));
+            let ptr = ptr.add(counter_offset).add(size_of::<AtomicUsize>());
+            capacity[counter_offset..].copy_from_slice(slice::from_raw_parts(
+                ptr.as_ptr(),
+                size_of::<usize>() - counter_offset,
+            ));
         }
+        usize::from_ne_bytes(capacity)
     }
 
     #[inline]
     const unsafe fn owned_str_mut(&mut self) -> &mut str {
-        // SAFETY: the caller ensured the pointer references the reference counter + string and that reference count is 1 (single access)
+        // SAFETY: the caller ensured that this is owned and uniquely held.
         unsafe {
             str::from_utf8_unchecked_mut(
-                NonNull::slice_from_raw_parts(
-                    self.data.cast::<AtomicUsize>().add(1).cast(),
-                    self.owned_len(),
-                )
-                .as_mut(),
+                NonNull::slice_from_raw_parts(self.data, self.len()).as_mut(),
             )
         }
-    }
-
-    #[inline]
-    const fn owned_len(&self) -> usize {
-        self.len ^ OWNED_FLAG
     }
 
     #[inline]
@@ -386,6 +401,30 @@ impl<'a> OxStr<'a> {
         unsafe {
             str::from_utf8_unchecked(NonNull::slice_from_raw_parts(self.data, self.len).as_ref())
         }
+    }
+}
+
+#[inline]
+unsafe fn initialize_counter_and_capacity(data: NonNull<u8>, len: usize, capacity: usize) {
+    // SAFETY: we assume data has at least len + size_of::(AtomicUsize) + max(size_of(usize), align_of(AtomicUsize))
+    // capacity, preventing out of bound reads
+    unsafe {
+        // We move after the data
+        let ptr = data.add(len);
+        // We compute the counter offset i.e. how many free bytes between the end of data and the first byte of the counter
+        let counter_offset = ptr.align_offset(align_of::<AtomicUsize>());
+        // We fetch the capacity bytes
+        let capacity = capacity.to_ne_bytes();
+        // We write the first part of capacity between the end of the data and the first byte of the counter i.e. counter_offset bytes
+        slice::from_raw_parts_mut(ptr.as_ptr(), counter_offset)
+            .copy_from_slice(&capacity[..counter_offset]);
+        // We write the counter after moving the ptr by the counter offset
+        let ptr = ptr.add(counter_offset);
+        ptr.cast::<AtomicUsize>().write(AtomicUsize::new(1));
+        // We write the last bytes of the capacity, we know we have at least size_of(counter) + size_of(capacity) so it's fine
+        let ptr = ptr.add(size_of::<AtomicUsize>());
+        slice::from_raw_parts_mut(ptr.as_ptr(), capacity.len() - counter_offset)
+            .copy_from_slice(&capacity[counter_offset..]);
     }
 }
 
@@ -400,7 +439,7 @@ impl Drop for OxStr<'_> {
     fn drop(&mut self) {
         if self.kind() == OxStrKind::Owned {
             // SAFETY: we just checked it's the owned variant, we can call owned_counter
-            // and then after doing proper ordering checks taken from Arc we can allocate
+            // and then after doing proper ordering checks taken from Arc we can deallocate
             // using the same layout as alloc
             unsafe {
                 // Load and fence from Arc implementation
@@ -408,11 +447,10 @@ impl Drop for OxStr<'_> {
                     return;
                 }
                 fence(Ordering::Acquire);
+                // SAFETY: we have checked this is an owned buffer and use the same layout as allocation
                 dealloc(
                     self.data.as_ptr(),
-                    // SAFETY: The length is immutable and this exact layout was
-                    // successfully computed when the allocation was created.
-                    Self::owned_layout_for_len(self.owned_len()).unwrap_unchecked(),
+                    Layout::array::<u8>(self.owned_capacity()).unwrap_unchecked(),
                 );
             }
         }
@@ -595,14 +633,39 @@ impl<'a> From<&'a OxStr<'a>> for &'a str {
 impl From<String> for OxStr<'_> {
     #[inline]
     fn from(value: String) -> Self {
-        Self::new_owned(&value)
+        let len = value.len();
+        let mut value = value.into_bytes();
+        #[expect(clippy::expect_used)]
+        let expected_capacity = len.checked_add(HEADER_SPACE).expect("capacity overflow");
+        if expected_capacity > value.capacity() {
+            value.reserve_exact(expected_capacity - len);
+        }
+        // SAFETY: Vec pointers are non-null, and the buffer now has room for an
+        // aligned header after the string bytes. The length remains unchanged.
+        let data = unsafe {
+            let data = NonNull::new_unchecked(value.as_mut_ptr());
+            initialize_counter_and_capacity(data, len, value.capacity());
+            data
+        };
+        let _value = ManuallyDrop::new(value); // Ensure we don't deallocate the Vec
+        Self {
+            len: len | OWNED_FLAG,
+            data,
+            _marker: PhantomData,
+        }
     }
 }
 
 impl From<OxStr<'_>> for String {
     #[inline]
     fn from(value: OxStr<'_>) -> Self {
-        value.as_str().to_owned()
+        if !value.is_owned_and_unique() {
+            return value.as_str().to_owned();
+        }
+        let value = ManuallyDrop::new(value);
+        // SAFETY: unique ownership transfers the entire allocation to String.
+        // All buffers use byte alignment.
+        unsafe { String::from_raw_parts(value.data.as_ptr(), value.len(), value.owned_capacity()) }
     }
 }
 
@@ -797,6 +860,55 @@ mod tests {
             "a string that starts to get a bit long"
         );
         assert_eq!(OxStr::from(String::with_capacity(128)).as_str(), "");
+    }
+
+    #[test]
+    fn from_string_reuses_spare_capacity() {
+        for content in ["", "a", "héllo 🦀"] {
+            for capacity in [0, 128] {
+                let mut input = String::with_capacity(capacity);
+                input.push_str(content);
+                let ptr = input.as_ptr();
+                let original_capacity = input.capacity();
+                let input = OxStr::from(input);
+                if capacity == 128 {
+                    assert_eq!(input.as_str().as_ptr(), ptr);
+                }
+                let input2 = input.clone(); // We exercise the clone()
+                assert_eq!(input, input2);
+                assert_eq!(input2.as_str(), content);
+                drop(input2);
+                let output = String::from(input);
+                assert_eq!(output, content);
+                if capacity == 128 {
+                    assert_eq!(output.as_ptr(), ptr);
+                    assert_eq!(output.capacity(), original_capacity);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn owned_buffers_at_each_alignment() {
+        for len in 0..2 * align_of::<AtomicUsize>() {
+            let content = "a".repeat(len);
+            let value = OxStr::new_owned(&content);
+            let mut copy = value.clone();
+            copy.make_mut().make_ascii_uppercase();
+            assert_eq!(copy.as_str(), content.to_ascii_uppercase());
+            assert_eq!(value.as_str(), content);
+
+            let from_string = OxStr::from(content);
+            assert_eq!(from_string, value);
+        }
+    }
+
+    #[test]
+    fn to_string() {
+        let value = OxStr::new_owned("héllo 🦀");
+        let output = String::from(value.clone());
+        assert_eq!(output, "héllo 🦀");
+        assert_eq!(String::from(value), "héllo 🦀");
     }
 
     #[test]
