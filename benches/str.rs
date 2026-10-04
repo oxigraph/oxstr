@@ -47,6 +47,30 @@ fn bench_oxstr_from_string(c: &mut Criterion) {
     });
 }
 
+fn bench_oxstr_from_string_with_spare_capacity(c: &mut Criterion) {
+    c.bench_function("OxStr.from String with spare capacity", |b| {
+        b.iter_batched(
+            || {
+                let mut value = String::with_capacity(128);
+                value.push_str("I am a quite enough long string, isn't it?");
+                black_box(value)
+            },
+            |value| black_box(OxStr::from(black_box(value))),
+            BatchSize::SmallInput,
+        )
+    });
+}
+
+fn bench_oxstr_from_large_string(c: &mut Criterion) {
+    c.bench_function("OxStr.from large String", |b| {
+        b.iter_batched(
+            || black_box("a".repeat(64_000)),
+            |str| black_box(OxStr::from(black_box(str))),
+            BatchSize::SmallInput,
+        )
+    });
+}
+
 fn bench_oxstr_borrowed_to_string(c: &mut Criterion) {
     c.bench_function("borrowed OxStr.to String", |b| {
         b.iter_batched(
@@ -78,6 +102,8 @@ criterion_group!(
     bench_oxstr_borrowed_to_owned,
     bench_oxstr_owned_clone,
     bench_oxstr_from_string,
+    bench_oxstr_from_string_with_spare_capacity,
+    bench_oxstr_from_large_string,
     bench_oxstr_borrowed_to_string,
     bench_oxstr_owned_to_string
 );

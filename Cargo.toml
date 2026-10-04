@@ -7,7 +7,6 @@ readme = "README.md"
 documentation = "https://docs.rs/oxstr"
 keywords = ["String"]
 repository = "https://github.com/oxigraph/oxstr"
-homepage = "https://github.com/oxigraph/oxstr"
 description = """
 A string type merging Arc<str> and &str
 """
