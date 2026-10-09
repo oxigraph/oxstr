@@ -190,13 +190,13 @@ impl<'a> OxStr<'a> {
     /// ```
     #[inline]
     #[track_caller]
-    pub fn concat<T: AsRef<str>>(values: impl AsRef<[T]>) -> Self {
+    pub fn concat<'b>(values: impl AsRef<[&'b str]>) -> Self {
         Self::try_concat(values).unwrap_or_else(|e| e.unwrap())
     }
 
     /// Concatenates all `values` into a new owned `OxStr` without intermediate allocations.
     ///
-    /// Returns `None` if allocation fails or if the final length exceeds the internal
+    /// Returns an error if allocation fails or if the final length exceeds the internal
     /// representable size.
     ///
     /// ```
@@ -206,11 +206,11 @@ impl<'a> OxStr<'a> {
     /// assert_eq!(value.as_str(), "abcdef");
     /// ```
     #[inline]
-    pub fn try_concat<T: AsRef<str>>(values: impl AsRef<[T]>) -> Result<Self, ReserveError> {
+    pub fn try_concat<'b>(values: impl AsRef<[&'b str]>) -> Result<Self, ReserveError> {
         let values = values.as_ref();
         let len = values
             .iter()
-            .map(|s| s.as_ref().len())
+            .map(|s| s.len())
             .try_fold(0usize, |a, v| a.checked_add(v))
             .ok_or(ReserveError::CapacityOverflow)?;
         if len >> KIND_SHIFT != 0 {
@@ -230,7 +230,6 @@ impl<'a> OxStr<'a> {
             initialize_counter_and_capacity(data, len, layout.size());
             let mut write_ptr = data;
             for value in values {
-                let value = value.as_ref();
                 write_ptr
                     .copy_from_nonoverlapping(NonNull::from(value.as_bytes()).cast(), value.len());
                 write_ptr = write_ptr.add(value.len());
