@@ -754,7 +754,7 @@ impl<'de> Deserialize<'de> for OxStr<'_> {
             }
 
             fn visit_bytes<E: de::Error>(self, v: &[u8]) -> Result<Self::Value, E> {
-                let str = std::str::from_utf8(v)
+                let str = str::from_utf8(v)
                     .map_err(|_| de::Error::invalid_value(de::Unexpected::Bytes(v), &self))?;
                 self.visit_str(str)
             }

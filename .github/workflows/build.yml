@@ -32,9 +32,10 @@ jobs:
           persist-credentials: false
       - run: rustup component add clippy
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo clippy --all-targets --no-default-features -- -D warnings -D clippy::all
       - run: cargo clippy --all-targets -- -D warnings -D clippy::all
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings -D clippy::all
       - run: cargo clippy --all-targets --features serde -- -D warnings -D clippy::all
+      - run: cargo clippy --all-targets --no-default-features --features serde -- -D warnings -D clippy::all
 
   test:
     runs-on: ubuntu-latest
@@ -73,10 +74,7 @@ jobs:
       - run: rustup override set nightly
       - run: rustup component add miri
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: cargo +nightly update -Z direct-minimal-versions
-        env:
-          CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS: fallback
-      - run: cargo test
+      - run: cargo miri test
 
   rustdoc:
     runs-on: ubuntu-latest
