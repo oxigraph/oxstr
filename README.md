@@ -41,6 +41,16 @@ use oxstr::OxStr;
 assert_eq!(OxStr::concat(["foo", " ", "bar"]), "foo bar");
 ```
 
+The `oxformat!` macro uses the same syntax as `format!` and returns an `OxString`:
+
+```rust
+use oxstr::{OxString, oxformat};
+
+let name = "world";
+let message: OxString = oxformat!("Hello, {name}!");
+assert_eq!(message, "Hello, world!");
+```
+
 Features:
 - `serde`: to enable `serde` integration.
 - `std`: to add some extra features relying on the `std` library

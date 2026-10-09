@@ -62,6 +62,39 @@ const HEADER_SPACE: usize = size_of::<AtomicUsize>()
 /// ```
 pub type OxString = OxStr<'static>;
 
+/// Creates an [`OxString`] using the same syntax as [`format!`](alloc::format!).
+///
+/// Supports positional and named arguments, captured variables, and all standard
+/// formatting traits and options. Works with or without the `std` feature.
+///
+/// Panics if a formatting trait implementation returns an error.
+///
+/// ```
+/// use oxstr::{OxString, oxformat};
+///
+/// let name = "world";
+/// assert_eq!(oxformat!("Hello, world!"), "Hello, world!");
+/// assert_eq!(oxformat!("Hello, {name}! {}", 42), "Hello, world! 42");
+/// assert_eq!(oxformat!("{value:04x}", value = 42), "002a");
+/// ```
+#[macro_export]
+macro_rules! oxformat {
+    ($($arg:tt)*) => {{
+        $crate::__oxformat(::core::format_args!($($arg)*))
+    }};
+}
+
+#[doc(hidden)]
+#[inline]
+#[track_caller]
+pub fn __oxformat(args: fmt::Arguments<'_>) -> OxString {
+    if let Some(value) = args.as_str() {
+        value.into()
+    } else {
+        alloc::fmt::format(args).into()
+    }
+}
+
 /// A compact string type that can be either borrowed or reference-counted owned data.
 ///
 /// `OxStr` is conceptually a fusion of [`Arc<str>`](alloc::sync::Arc) and [`Cow<'a, str>`](alloc::borrow::Cow):
