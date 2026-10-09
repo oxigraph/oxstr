@@ -343,7 +343,12 @@ impl<'a> OxStr<'a> {
     pub fn get_mut(&mut self) -> Option<&mut str> {
         // SAFETY: if this is an owned buffer and there is a single reference to it, and we have exclusive access via &mut,
         // we can mutate the buffer, there is no possible other access to it
-        unsafe { self.is_owned_and_unique().then(|| self.owned_str_mut()) }
+        unsafe {
+            self.is_owned_and_unique().then(|| {
+                fence(Ordering::Acquire); // We make sure concurrent reads happen before mutating the string
+                self.owned_str_mut()
+            })
+        }
     }
 
     /// Ensures unique ownership and returns a mutable view of the string contents.
@@ -367,6 +372,7 @@ impl<'a> OxStr<'a> {
             let value = OxString::new_owned(self.as_str());
             *self = value;
         }
+        fence(Ordering::Acquire); // We make sure concurrent reads happen before mutating the string
         // SAFETY: We made sure self is an owned string with a single reference
         unsafe { self.owned_str_mut() }
     }
@@ -381,7 +387,7 @@ impl<'a> OxStr<'a> {
     fn is_owned_and_unique(&self) -> bool {
         // SAFETY: the caller ensured the pointer targets the reference counter
         self.kind() == OxStrKind::Owned
-            && unsafe { self.owned_counter().load(Ordering::Acquire) == 1 }
+            && unsafe { self.owned_counter().load(Ordering::Relaxed) == 1 }
     }
 
     #[inline]
@@ -694,6 +700,7 @@ impl From<OxStr<'_>> for String {
         if !value.is_owned_and_unique() {
             return value.as_str().to_owned();
         }
+        fence(Ordering::Acquire); // We add a fence make make sure concurrent reads are before the possible mutations after this method call
         let value = ManuallyDrop::new(value);
         // SAFETY: unique ownership transfers the entire allocation to String.
         // All buffers use byte alignment.
