@@ -22,7 +22,7 @@ serde = ["dep:serde"]
 serde = { version = "1.0.217", default-features = false, optional = true }
 
 [dev-dependencies]
-codspeed-criterion-compat = ">=4,<6"
+codspeed-criterion-compat = ">=4, <7"
 
 [[bench]]
 name = "str"
